@@ -1,4 +1,0 @@
-## Append samples of your project ##
-resources:
-- mygroup_v1_securitypolicy.yaml
-#+kubebuilder:scaffold:manifestskustomizesamples
