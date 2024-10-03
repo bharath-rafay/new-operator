@@ -8,6 +8,7 @@
 bin/*
 Dockerfile.cross
 
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -20,10 +21,13 @@ go.work
 # Kubernetes Generated files - skip generated files, except for vendored files
 !vendor/**/zz_generated.*
 
+
 # editor and IDE paraphernalia
 .idea
 .vscode
 *.swp
 *.swo
 *~
-./vendor
+
+# Dependency directories (remove the comment below to include it)
+vendor/
