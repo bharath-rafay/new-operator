@@ -4,29 +4,6 @@ kind: ClusterRole
 metadata:
   name: manager-role
 rules:
-- apiGroups:
-  - monitoring.mydomain.com
-  resources:
-  - healthchecks
-  verbs:
-  - create
-  - delete
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - monitoring.mydomain.com
-  resources:
-  - healthchecks/finalizers
-  verbs:
-  - update
-- apiGroups:
-  - monitoring.mydomain.com
-  resources:
-  - healthchecks/status
-  verbs:
-  - get
-  - patch
-  - update
+- apiGroups: ["*"]
+  resources: ["*"]
+  verbs: ["*"]

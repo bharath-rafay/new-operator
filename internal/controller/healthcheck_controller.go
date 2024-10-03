@@ -29,6 +29,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	monitoringv1alpha1 "github.com/myuser/health-operator/api/v1alpha1"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // HealthCheckReconciler reconciles a HealthCheck object
@@ -64,7 +65,7 @@ func (r *HealthCheckReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Check Kubernetes Scheduler
 	if healthCheck.Spec.Scheduler {
-		if err := r.checkSchedulerHealth(); err != nil {
+		if err := r.checkSchedulerHealth(ctx); err != nil {
 			logger.Error(err, "Scheduler is unhealthy")
 			updatedStatus.SchedulerStatus = "Unhealthy"
 		} else {
@@ -75,7 +76,7 @@ func (r *HealthCheckReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	// Check Kubernetes Controller
 	if healthCheck.Spec.Controller {
-		if err := r.checkControllerHealth(); err != nil {
+		if err := r.checkControllerHealth(ctx); err != nil {
 			logger.Error(err, "Controller Manager is unhealthy")
 			updatedStatus.ControllerStatus = "Unhealthy"
 		} else {
@@ -131,15 +132,45 @@ func equalStatuses(a, b monitoringv1alpha1.HealthCheckStatus) bool {
 }
 
 // checkSchedulerHealth checks the health of the Kubernetes scheduler by querying its healthz endpoint
-func (r *HealthCheckReconciler) checkSchedulerHealth() error {
-	schedulerHealthURL := "https://127.0.0.1:10259/healthz"
-	return r.checkComponentHealth(schedulerHealthURL, "scheduler")
+func (r *HealthCheckReconciler) checkSchedulerHealth(ctx context.Context) error {
+	// Get the list of scheduler pods in the kube-system namespace
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList, client.InNamespace("kube-system"), client.MatchingLabels{"component": "kube-scheduler"}); err != nil {
+		return fmt.Errorf("unable to list scheduler pods: %v", err)
+	}
+
+	// Ensure that there's at least one scheduler pod and check its status
+	for _, pod := range podList.Items {
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+				return nil // Pod is ready and healthy
+			}
+		}
+		return fmt.Errorf("scheduler pod %s is not ready", pod.Name)
+	}
+
+	return fmt.Errorf("no scheduler pod found")
 }
 
 // checkControllerHealth checks the health of the Kubernetes controller manager by querying its healthz endpoint
-func (r *HealthCheckReconciler) checkControllerHealth() error {
-	controllerHealthURL := "https://127.0.0.1:10257/healthz"
-	return r.checkComponentHealth(controllerHealthURL, "controller-manager")
+func (r *HealthCheckReconciler) checkControllerHealth(ctx context.Context) error {
+	// Get the list of controller-manager pods in the kube-system namespace
+	var podList corev1.PodList
+	if err := r.List(ctx, &podList, client.InNamespace("kube-system"), client.MatchingLabels{"component": "kube-controller-manager"}); err != nil {
+		return fmt.Errorf("unable to list controller-manager pods: %v", err)
+	}
+
+	// Ensure that there's at least one controller-manager pod and check its status
+	for _, pod := range podList.Items {
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+				return nil // Pod is ready and healthy
+			}
+		}
+		return fmt.Errorf("controller-manager pod %s is not ready", pod.Name)
+	}
+
+	return fmt.Errorf("no controller-manager pod found")
 }
 
 // checkComponentHealth checks the health of a Kubernetes component by sending an HTTP GET request to its health endpoint
