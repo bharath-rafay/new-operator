@@ -1,27 +1,27 @@
-# permissions for end users to view healthchecks.
+# permissions for end users to view daemonservices.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
     app.kubernetes.io/name: clusterrole
-    app.kubernetes.io/instance: healthcheck-viewer-role
+    app.kubernetes.io/instance: daemonservice-viewer-role
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: security-operator
     app.kubernetes.io/part-of: security-operator
     app.kubernetes.io/managed-by: kustomize
-  name: healthcheck-viewer-role
+  name: daemonservice-viewer-role
 rules:
 - apiGroups:
-  - monitoring.mydomain.com
+  - monitoring.example.com
   resources:
-  - healthchecks
+  - daemonservices
   verbs:
   - get
   - list
   - watch
 - apiGroups:
-  - monitoring.mydomain.com
+  - monitoring.example.com
   resources:
-  - healthchecks/status
+  - daemonservices/status
   verbs:
   - get

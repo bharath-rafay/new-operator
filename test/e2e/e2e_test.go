@@ -24,7 +24,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/myuser/health-operator/test/utils"
+	"github.com/bharath-rafay/security-operator/test/utils"
 )
 
 const namespace = "security-operator-system"

@@ -1,0 +1,12 @@
+apiVersion: monitoring.example.com/v1alpha1
+kind: DaemonService
+metadata:
+  labels:
+    app.kubernetes.io/name: daemonservice
+    app.kubernetes.io/instance: daemonservice-sample
+    app.kubernetes.io/part-of: security-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: security-operator
+  name: daemonservice-sample
+spec:
+  # TODO(user): Add fields here

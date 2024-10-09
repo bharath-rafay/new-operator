@@ -1,4 +1,4 @@
-module github.com/myuser/health-operator
+module github.com/bharath-rafay/security-operator
 
 go 1.20
 

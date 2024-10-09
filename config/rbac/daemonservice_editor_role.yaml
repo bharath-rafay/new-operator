@@ -1,20 +1,20 @@
-# permissions for end users to edit healthchecks.
+# permissions for end users to edit daemonservices.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
     app.kubernetes.io/name: clusterrole
-    app.kubernetes.io/instance: healthcheck-editor-role
+    app.kubernetes.io/instance: daemonservice-editor-role
     app.kubernetes.io/component: rbac
     app.kubernetes.io/created-by: security-operator
     app.kubernetes.io/part-of: security-operator
     app.kubernetes.io/managed-by: kustomize
-  name: healthcheck-editor-role
+  name: daemonservice-editor-role
 rules:
 - apiGroups:
-  - monitoring.mydomain.com
+  - monitoring.example.com
   resources:
-  - healthchecks
+  - daemonservices
   verbs:
   - create
   - delete
@@ -24,8 +24,8 @@ rules:
   - update
   - watch
 - apiGroups:
-  - monitoring.mydomain.com
+  - monitoring.example.com
   resources:
-  - healthchecks/status
+  - daemonservices/status
   verbs:
   - get

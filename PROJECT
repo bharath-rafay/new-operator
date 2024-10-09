@@ -2,22 +2,22 @@
 # This file is used to track the info used to scaffold your project
 # and allow the plugins properly work.
 # More info: https://book.kubebuilder.io/reference/project-config.html
-domain: mydomain.com
+domain: example.com
 layout:
 - go.kubebuilder.io/v4
 plugins:
   manifests.sdk.operatorframework.io/v2: {}
   scorecard.sdk.operatorframework.io/v2: {}
 projectName: security-operator
-repo: github.com/myuser/health-operator
+repo: github.com/bharath-rafay/security-operator
 resources:
 - api:
     crdVersion: v1
     namespaced: true
   controller: true
-  domain: mydomain.com
+  domain: example.com
   group: monitoring
-  kind: HealthCheck
-  path: github.com/myuser/health-operator/api/v1alpha1
+  kind: DaemonService
+  path: github.com/bharath-rafay/security-operator/api/v1alpha1
   version: v1alpha1
 version: "3"
