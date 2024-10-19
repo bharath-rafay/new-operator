@@ -7,6 +7,9 @@ metadata:
     app.kubernetes.io/part-of: security-operator
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/created-by: security-operator
-  name: daemonservice-sample
+  name: my-service-monitor
 spec:
-  # TODO(user): Add fields here
+  serviceNames:
+    - "kubelet"
+    - "etcd"
+  monitorK8sCore: true
