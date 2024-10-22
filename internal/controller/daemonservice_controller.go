@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
+	"os"
 	"strings"
 	"time"
 
@@ -29,6 +31,7 @@ import (
 	"encoding/hex"
 
 	monitoringv1alpha1 "github.com/bharath-rafay/security-operator/api/v1alpha1"
+	"github.com/pmezard/go-difflib/difflib"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -69,13 +72,6 @@ func (r *DaemonServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{RequeueAfter: time.Minute * 1}, client.IgnoreNotFound(err)
 	}
 
-	// Step 1: Check for configuration changes in core component pods
-	configStatuses, err := r.checkK8sCorePodChanges(ctx, &daemonService)
-	if err != nil {
-		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return ctrl.Result{RequeueAfter: time.Minute * 1}, err
-	}
-
 	// Step 2: Monitor Kubernetes core components if enabled
 	nodeStatuses := []monitoringv1alpha1.NodeServiceStatus{}
 	if daemonService.Spec.MonitorK8sCore {
@@ -91,13 +87,13 @@ func (r *DaemonServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if len(daemonService.Spec.ServiceNames) > 0 {
 		if err := r.deployDaemonSet(ctx, daemonService); err != nil {
 			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: time.Second * 10}, err
 		}
 
-		// if err := r.waitForDaemonSetReady(ctx); err != nil {
-		// 	//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		// 	return ctrl.Result{}, err
-		// }
+		if err := r.waitForDaemonSetReady(ctx); err != nil {
+			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
+			return ctrl.Result{}, err
+		}
 
 		podList := &corev1.PodList{}
 		labelSelector := labels.SelectorFromSet(labels.Set{"app": "service-monitor"})
@@ -114,12 +110,12 @@ func (r *DaemonServiceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			}
 			nodeStatuses = append(nodeStatuses, nodeStatus)
 		}
-		time.Sleep(time.Second * 10)
-		// Delete the DaemonSet after collecting the status
-		if err := r.deleteDaemonSet(ctx); err != nil {
-			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-			return ctrl.Result{RequeueAfter: time.Second * 10}, err
-		}
+	}
+
+	configStatuses, err := r.checkK8sCorePodChanges(ctx, &daemonService)
+	if err != nil {
+		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
+		return ctrl.Result{RequeueAfter: time.Minute * 1}, err
 	}
 
 	// Step 4: Update the status with results from custom services, core components, and config changes
@@ -153,7 +149,7 @@ func (r *DaemonServiceReconciler) checkK8sCorePodChanges(ctx context.Context, da
 		}
 
 		// Compute the checksum of the current pod spec
-		currentChecksum, err := computePodSpecChecksum(pod)
+		currentChecksum, err := computePodSpecChecksum(pod, componentName)
 		if err != nil {
 			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 			return nil, err
@@ -164,16 +160,20 @@ func (r *DaemonServiceReconciler) checkK8sCorePodChanges(ctx context.Context, da
 
 		// Check the previously stored checksum in the status
 		for _, storedConfig := range daemonService.Status.Configurations {
-			if storedConfig.ComponentName == componentName {
+			if storedConfig.ComponentName == componentName && storedConfig.OldChecksum == "" {
 				oldChecksum = storedConfig.NewChecksum
 				configChanged = (currentChecksum != oldChecksum)
+				break
+			} else if storedConfig.ComponentName == componentName && storedConfig.OldChecksum != "" {
+				oldChecksum = storedConfig.OldChecksum
+				configChanged = (currentChecksum != storedConfig.OldChecksum)
 				break
 			}
 		}
 
 		// If configuration changed, store the new checksum and mark as changed
 		if configChanged {
-			diff, err := r.generatePodConfigDiff(pod)
+			diff, err := r.generatePodConfigDiff(pod, componentName)
 			if err != nil {
 				//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 				return nil, err
@@ -198,22 +198,28 @@ func (r *DaemonServiceReconciler) checkK8sCorePodChanges(ctx context.Context, da
 }
 
 // Generate a diff for the pod spec (or just include relevant fields for simplicity)
-func (r *DaemonServiceReconciler) generatePodConfigDiff(pod *corev1.Pod) (string, error) {
-	relevantSpec := struct {
-		Containers []corev1.Container `json:"containers"`
-		Volumes    []corev1.Volume    `json:"volumes"`
-	}{
-		Containers: pod.Spec.Containers,
-		Volumes:    pod.Spec.Volumes,
-	}
+func (r *DaemonServiceReconciler) generatePodConfigDiff(pod *corev1.Pod, name string) (string, error) {
+	// relevantSpec := struct {
+	// 	Containers []corev1.Container `json:"containers"`
+	// 	Volumes    []corev1.Volume    `json:"volumes"`
+	// }{
+	// 	Containers: pod.Spec.Containers,
+	// 	Volumes:    pod.Spec.Volumes,
+	// }
 
 	// Return the relevant parts of the pod spec as a diff (could be more sophisticated)
-	podSpecBytes, err := json.MarshalIndent(relevantSpec, "", "  ")
+	podSpecBytes, err := json.Marshal(pod)
 	if err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 		return "", err
 	}
-	return string(podSpecBytes), nil
+	oldSpecBytes, err := getOldData(name)
+	if err != nil {
+		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
+		return "", err
+	}
+
+	return getDiff(string(oldSpecBytes), string(podSpecBytes))
 }
 
 func (r *DaemonServiceReconciler) deployDaemonSet(ctx context.Context, daemonService monitoringv1alpha1.DaemonService) error {
@@ -297,30 +303,29 @@ func (r *DaemonServiceReconciler) deployDaemonSet(ctx context.Context, daemonSer
 		},
 	}
 
-	if err := r.Client.Create(ctx, daemonSet); err != nil && !errors.IsAlreadyExists(err) {
-		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return err
+	if err := r.Client.Delete(ctx, daemonSet); err == nil || errors.IsNotFound(err) {
+		if err := r.Client.Create(ctx, daemonSet); err != nil && !errors.IsAlreadyExists(err) {
+			return err
+		}
 	}
 	return nil
 }
 
 // Helper function to compute checksum from pod spec (relevant fields)
-func computePodSpecChecksum(pod *corev1.Pod) (string, error) {
+func computePodSpecChecksum(pod *corev1.Pod, name string) (string, error) {
 	// Extract relevant fields from the pod spec (command, args, env, etc.)
-	relevantSpec := struct {
-		Containers []corev1.Container `json:"containers"`
-		Volumes    []corev1.Volume    `json:"volumes"`
-	}{
-		Containers: pod.Spec.Containers,
-		Volumes:    pod.Spec.Volumes,
-	}
-
+	file := "/data/" + name + ".yaml"
 	// Serialize the relevant fields to JSON
-	podSpecBytes, err := json.Marshal(relevantSpec)
+	podSpecBytes, err := json.Marshal(pod)
 	if err != nil {
 		return "", err
 	}
-
+	if !fileExists(file) {
+		err = writeYAMLToFile(file, podSpecBytes)
+		if err != nil {
+			return "", err
+		}
+	}
 	// Calculate the checksum (hash)
 	hash := sha256.Sum256(podSpecBytes)
 	return hex.EncodeToString(hash[:]), nil
@@ -485,4 +490,49 @@ func (r *DaemonServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&monitoringv1alpha1.DaemonService{}).
 		Complete(r)
+
+}
+
+func fileExists(filename string) bool {
+	_, err := os.Stat(filename)
+	return !os.IsNotExist(err)
+}
+
+func writeYAMLToFile(filename string, data []byte) error {
+
+	// Write the YAML data to the file
+	err := ioutil.WriteFile(filename, data, 0644)
+	if err != nil {
+		return fmt.Errorf("error writing to file: %v", err)
+	}
+
+	fmt.Println("File created and data written successfully.")
+	return nil
+}
+
+func getOldData(name string) ([]byte, error) {
+	filename := "/data/" + name + ".yaml"
+
+	fileBytes, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, fmt.Errorf("error reading file: %v", err)
+	}
+
+	return fileBytes, nil
+
+}
+
+func getDiff(oldContent, newContent string) (string, error) {
+	oldLines := difflib.SplitLines(oldContent)
+	newLines := difflib.SplitLines(newContent)
+
+	diff := difflib.UnifiedDiff{
+		A:        oldLines,
+		B:        newLines,
+		FromFile: "Old Version",
+		ToFile:   "New Version",
+		Context:  3,
+	}
+
+	return difflib.GetUnifiedDiffString(diff)
 }

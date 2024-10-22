@@ -72,6 +72,9 @@ spec:
         - --leader-elect
         image: controller:latest
         name: manager
+        volumeMounts:
+        - name: host-data
+          mountPath: /data
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -98,5 +101,10 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
+      volumes:
+      - name: host-data
+        hostPath:
+          path: /data  # This is the path on the host that you want to mount into the container
+          type: Directory
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
