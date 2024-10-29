@@ -30,7 +30,7 @@ import (
 	monitoringv1alpha1 "github.com/bharath-rafay/security-operator/api/v1alpha1"
 )
 
-var _ = Describe("DaemonService Controller", func() {
+var _ = Describe("MonitoringService Controller", func() {
 	Context("When reconciling a resource", func() {
 		const resourceName = "test-resource"
 
@@ -40,13 +40,13 @@ var _ = Describe("DaemonService Controller", func() {
 			Name:      resourceName,
 			Namespace: "default", // TODO(user):Modify as needed
 		}
-		daemonservice := &monitoringv1alpha1.DaemonService{}
+		monitoringservice := &monitoringv1alpha1.MonitoringService{}
 
 		BeforeEach(func() {
-			By("creating the custom resource for the Kind DaemonService")
-			err := k8sClient.Get(ctx, typeNamespacedName, daemonservice)
+			By("creating the custom resource for the Kind MonitoringService")
+			err := k8sClient.Get(ctx, typeNamespacedName, monitoringservice)
 			if err != nil && errors.IsNotFound(err) {
-				resource := &monitoringv1alpha1.DaemonService{
+				resource := &monitoringv1alpha1.MonitoringService{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      resourceName,
 						Namespace: "default",
@@ -59,16 +59,16 @@ var _ = Describe("DaemonService Controller", func() {
 
 		AfterEach(func() {
 			// TODO(user): Cleanup logic after each test, like removing the resource instance.
-			resource := &monitoringv1alpha1.DaemonService{}
+			resource := &monitoringv1alpha1.MonitoringService{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
 
-			By("Cleanup the specific resource instance DaemonService")
+			By("Cleanup the specific resource instance MonitoringService")
 			Expect(k8sClient.Delete(ctx, resource)).To(Succeed())
 		})
 		It("should successfully reconcile the resource", func() {
 			By("Reconciling the created resource")
-			controllerReconciler := &DaemonServiceReconciler{
+			controllerReconciler := &MonitoringServiceReconciler{
 				Client: k8sClient,
 				Scheme: k8sClient.Scheme(),
 			}

@@ -1,137 +1,119 @@
-/*
-Copyright 2024.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package controller
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
-	"strings"
 	"time"
 
 	"crypto/sha256"
 	"encoding/hex"
 
 	monitoringv1alpha1 "github.com/bharath-rafay/security-operator/api/v1alpha1"
-	"github.com/pmezard/go-difflib/difflib"
+	difflib "github.com/sergi/go-diff/diffmatchpatch"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/utils/pointer"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
-// DaemonServiceReconciler reconciles a DaemonService object
-type DaemonServiceReconciler struct {
+// MonitoringServiceReconciler reconciles a MonitoringService object
+type MonitoringServiceReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	// logger func(request *reconcile.Request) logr.Logger
 }
 
-//+kubebuilder:rbac:groups=monitoring.example.com,resources=daemonservices,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=monitoring.example.com,resources=daemonservices/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=monitoring.example.com,resources=daemonservices/finalizers,verbs=update
+//+kubebuilder:rbac:groups=monitoring.example.com,resources=MonitoringServices,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=monitoring.example.com,resources=MonitoringServices/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=monitoring.example.com,resources=MonitoringServices/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 // TODO(user): Modify the Reconcile function to compare the state specified by
-// the DaemonService object against the actual cluster state, and then
+// the MonitoringService object against the actual cluster state, and then
 // perform operations to make the cluster state reflect the state specified by
 // the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.16.3/pkg/reconcile
-func (r *DaemonServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	var daemonService monitoringv1alpha1.DaemonService
-	if err := r.Get(ctx, req.NamespacedName, &daemonService); err != nil {
+func (r *MonitoringServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	var MonitoringService monitoringv1alpha1.MonitoringService
+	if err := r.Get(ctx, req.NamespacedName, &MonitoringService); err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return ctrl.Result{RequeueAfter: time.Minute * 1}, client.IgnoreNotFound(err)
+		return ctrl.Result{RequeueAfter: time.Minute * 5}, client.IgnoreNotFound(err)
 	}
 
 	// Step 2: Monitor Kubernetes core components if enabled
-	nodeStatuses := []monitoringv1alpha1.NodeServiceStatus{}
-	if daemonService.Spec.MonitorK8sCore {
+	k8sNodeStatuses := []monitoringv1alpha1.K8sMonitorStatus{}
+	NodeServiceStatus := []monitoringv1alpha1.NodeServiceMonitorStatus{}
+	if MonitoringService.Spec.K8sMonitor.Enabled {
 		coreStatuses, err := r.checkK8sCoreComponents(ctx)
 		if err != nil {
 			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-			return ctrl.Result{RequeueAfter: time.Minute * 1}, err
+			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
 		}
-		nodeStatuses = append(nodeStatuses, coreStatuses...)
+		k8sNodeStatuses = append(k8sNodeStatuses, coreStatuses...)
 	}
 
 	// Step 3: Deploy the DaemonSet to monitor custom daemon services if needed
-	if len(daemonService.Spec.ServiceNames) > 0 {
-		if err := r.deployDaemonSet(ctx, daemonService); err != nil {
+	if MonitoringService.Spec.NodeServiceMonitor.Enabled && len(MonitoringService.Spec.NodeServiceMonitor.Services) > 0 {
+		if err := r.deployDaemonSet(ctx, MonitoringService); err != nil {
 			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-			return ctrl.Result{RequeueAfter: time.Second * 10}, err
-		}
-
-		if err := r.waitForDaemonSetReady(ctx); err != nil {
-			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
 		}
 
 		podList := &corev1.PodList{}
-		labelSelector := labels.SelectorFromSet(labels.Set{"app": "service-monitor"})
+		labelSelector := labels.SelectorFromSet(labels.Set{"app": "nsenter-daemon"})
 		if err := r.List(ctx, podList, &client.ListOptions{LabelSelector: labelSelector}); err != nil {
 			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-			return ctrl.Result{RequeueAfter: time.Second * 10}, err
+			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
 		}
 
 		for _, pod := range podList.Items {
-			nodeStatus, err := r.getMultiServiceStatusFromPod(ctx, pod)
+			nodeStatus, err := r.getMultiServiceStatusFromPod(ctx, pod, MonitoringService.Spec.NodeServiceMonitor.Services)
 			if err != nil {
 				//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-				return ctrl.Result{RequeueAfter: time.Second * 10}, err
+				return ctrl.Result{RequeueAfter: time.Minute * 5}, err
 			}
-			nodeStatuses = append(nodeStatuses, nodeStatus)
+			NodeServiceStatus = append(NodeServiceStatus, nodeStatus)
 		}
 	}
 
-	configStatuses, err := r.checkK8sCorePodChanges(ctx, &daemonService)
+	configStatuses, err := r.checkK8sCorePodChanges(ctx, &MonitoringService)
 	if err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return ctrl.Result{RequeueAfter: time.Minute * 1}, err
+		return ctrl.Result{RequeueAfter: time.Minute * 5}, err
 	}
 
 	// Step 4: Update the status with results from custom services, core components, and config changes
-	daemonService.Status.Nodes = nodeStatuses
-	daemonService.Status.Configurations = configStatuses
-	if err := r.Status().Update(ctx, &daemonService); err != nil {
+	MonitoringService.Status.K8sMonitorStatus = k8sNodeStatuses
+	MonitoringService.Status.NodeServiceMonitorStatus = NodeServiceStatus
+	MonitoringService.Status.K8sConfigDriftStatus = configStatuses
+	if err := r.Status().Update(ctx, &MonitoringService); err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return ctrl.Result{RequeueAfter: time.Minute * 1}, err
+		return ctrl.Result{RequeueAfter: time.Minute * 5}, err
 	}
 
 	// Requeue after a specified interval
-	return ctrl.Result{RequeueAfter: time.Minute * 1}, nil
+	return ctrl.Result{RequeueAfter: time.Minute * 5}, nil
 }
 
-func (r *DaemonServiceReconciler) checkK8sCorePodChanges(ctx context.Context, daemonService *monitoringv1alpha1.DaemonService) ([]monitoringv1alpha1.ConfigurationStatus, error) {
-	var configStatuses []monitoringv1alpha1.ConfigurationStatus
+func (r *MonitoringServiceReconciler) checkK8sCorePodChanges(ctx context.Context, MonitoringService *monitoringv1alpha1.MonitoringService) ([]monitoringv1alpha1.K8sConfigDriftStatus, error) {
+	var configStatuses []monitoringv1alpha1.K8sConfigDriftStatus
 
 	// List of core Kubernetes components to monitor
 	coreComponents := []string{
@@ -159,7 +141,7 @@ func (r *DaemonServiceReconciler) checkK8sCorePodChanges(ctx context.Context, da
 		var configChanged bool
 
 		// Check the previously stored checksum in the status
-		for _, storedConfig := range daemonService.Status.Configurations {
+		for _, storedConfig := range MonitoringService.Status.K8sConfigDriftStatus {
 			if storedConfig.ComponentName == componentName && storedConfig.OldChecksum == "" {
 				oldChecksum = storedConfig.NewChecksum
 				configChanged = (currentChecksum != oldChecksum)
@@ -178,7 +160,7 @@ func (r *DaemonServiceReconciler) checkK8sCorePodChanges(ctx context.Context, da
 				//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 				return nil, err
 			}
-			configStatuses = append(configStatuses, monitoringv1alpha1.ConfigurationStatus{
+			configStatuses = append(configStatuses, monitoringv1alpha1.K8sConfigDriftStatus{
 				ComponentName:        componentName,
 				ConfigChanged:        true,
 				OldChecksum:          oldChecksum,
@@ -186,7 +168,7 @@ func (r *DaemonServiceReconciler) checkK8sCorePodChanges(ctx context.Context, da
 				ChangedConfiguration: diff, // Include the diff or relevant changed fields
 			})
 		} else {
-			configStatuses = append(configStatuses, monitoringv1alpha1.ConfigurationStatus{
+			configStatuses = append(configStatuses, monitoringv1alpha1.K8sConfigDriftStatus{
 				ComponentName: componentName,
 				ConfigChanged: false,
 				NewChecksum:   currentChecksum,
@@ -198,7 +180,7 @@ func (r *DaemonServiceReconciler) checkK8sCorePodChanges(ctx context.Context, da
 }
 
 // Generate a diff for the pod spec (or just include relevant fields for simplicity)
-func (r *DaemonServiceReconciler) generatePodConfigDiff(pod *corev1.Pod, name string) (string, error) {
+func (r *MonitoringServiceReconciler) generatePodConfigDiff(pod *corev1.Pod, name string) (string, error) {
 	// relevantSpec := struct {
 	// 	Containers []corev1.Container `json:"containers"`
 	// 	Volumes    []corev1.Volume    `json:"volumes"`
@@ -222,92 +204,59 @@ func (r *DaemonServiceReconciler) generatePodConfigDiff(pod *corev1.Pod, name st
 	return getDiff(string(oldSpecBytes), string(podSpecBytes))
 }
 
-func (r *DaemonServiceReconciler) deployDaemonSet(ctx context.Context, daemonService monitoringv1alpha1.DaemonService) error {
-	serviceList := convertServiceNames(daemonService.Spec.ServiceNames)
+func (r *MonitoringServiceReconciler) deployDaemonSet(ctx context.Context, MonitoringService monitoringv1alpha1.MonitoringService) error {
+	// serviceList := convertServiceNames(MonitoringService.Spec.NodeServiceMonitor.Services)
 	daemonSet := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "service-monitor",
+			Name:      "nsenter-daemon",
 			Namespace: "default",
 		},
 		Spec: appsv1.DaemonSetSpec{
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"app": "service-monitor"},
+				MatchLabels: map[string]string{
+					"app": "nsenter-daemon",
+				},
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"app": "service-monitor"},
+					Labels: map[string]string{
+						"app": "nsenter-daemon",
+					},
 				},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
+					HostPID:     true,
+					HostNetwork: true,
+					Tolerations: []corev1.Toleration{
 						{
-							Name:    "service-monitor",
-							Image:   "ubuntu:latest",
-							Command: []string{"/bin/bash", "-c"},
-							Args: []string{
-								fmt.Sprintf(`
-                                    while true; do
-                                        statuses=();
-                                        for service in %s; do
-                                            status=$(ps aux | grep -q '$service' && echo "Running" || echo "Not Running");
-											cleaned_service=$(echo "$service" | sed 's/\[\(.\)\]\(.*\)/\1\2/');
-                                            statuses+=("{\"serviceName\":\"$cleaned_service\", \"serviceStatus\":\"$status\"}")
-                                        done;
-										test=$(IFS=','; echo "${statuses[*]}");
-                                        echo "{\"node\":\"$(hostname)\", \"services\":[$test]}";
-                                        sleep 300;
-                                    done
-                                `, strings.Join(serviceList, " ")),
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									MountPath: "/host-root",
-									Name:      "root",
-									ReadOnly:  true,
-								},
-								// {
-								// 	MountPath: "/run/systemd",
-								// 	Name:      "systemd",
-								// 	ReadOnly:  true,
-								// },
-							},
-							SecurityContext: &corev1.SecurityContext{
-								Privileged: pointer.BoolPtr(true),
-								RunAsUser:  pointer.Int64Ptr(0),
-							},
+							Operator: corev1.TolerationOpExists,
 						},
 					},
-					HostNetwork: true,
-					HostPID:     true,
-					Volumes: []corev1.Volume{
+					Containers: []corev1.Container{
 						{
-							Name: "root",
-							VolumeSource: corev1.VolumeSource{
-								HostPath: &corev1.HostPathVolumeSource{
-									Path: "/",
-									// Type: (*corev1.HostPathType)(pointer.StringPtr("Directory")),
+							Name:    "nsenter",
+							Image:   "alexeiled/nsenter",
+							Command: []string{"/nsenter", "--all", "--target=1", "--", "su", "-"},
+							Stdin:   true,
+							TTY:     true,
+							SecurityContext: &corev1.SecurityContext{
+								Privileged: pointer.Bool(true),
+							},
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceCPU: resource.MustParse("10m"),
 								},
 							},
 						},
-						// {
-						// 	Name: "systemd",
-						// 	VolumeSource: corev1.VolumeSource{
-						// 		HostPath: &corev1.HostPathVolumeSource{
-						// 			Path: "/run/systemd",
-						// 			Type: (*corev1.HostPathType)(pointer.StringPtr("Directory")),
-						// 		},
-						// 	},
-						// },
 					},
 				},
 			},
 		},
 	}
 
-	if err := r.Client.Delete(ctx, daemonSet); err == nil || errors.IsNotFound(err) {
-		if err := r.Client.Create(ctx, daemonSet); err != nil && !errors.IsAlreadyExists(err) {
-			return err
-		}
+	if err := r.Client.Create(ctx, daemonSet); err != nil && !errors.IsAlreadyExists(err) {
+		return err
 	}
+
 	return nil
 }
 
@@ -332,7 +281,7 @@ func computePodSpecChecksum(pod *corev1.Pod, name string) (string, error) {
 }
 
 // Function to retrieve the pod for a specific component (e.g., kube-apiserver)
-func (r *DaemonServiceReconciler) getCoreComponentPod(ctx context.Context, componentName string) (*corev1.Pod, error) {
+func (r *MonitoringServiceReconciler) getCoreComponentPod(ctx context.Context, componentName string) (*corev1.Pod, error) {
 	podList := &corev1.PodList{}
 	// Retrieve pods from the kube-system namespace with a label selector
 	labelSelector := metav1.LabelSelector{
@@ -357,8 +306,8 @@ func (r *DaemonServiceReconciler) getCoreComponentPod(ctx context.Context, compo
 	return nil, fmt.Errorf("no pod found for component %s", componentName)
 }
 
-func (r *DaemonServiceReconciler) checkK8sCoreComponents(ctx context.Context) ([]monitoringv1alpha1.NodeServiceStatus, error) {
-	var coreStatuses []monitoringv1alpha1.NodeServiceStatus
+func (r *MonitoringServiceReconciler) checkK8sCoreComponents(ctx context.Context) ([]monitoringv1alpha1.K8sMonitorStatus, error) {
+	var coreStatuses []monitoringv1alpha1.K8sMonitorStatus
 
 	// List the Kubernetes core components in the kube-system namespace
 	componentPods := []string{
@@ -384,7 +333,7 @@ func (r *DaemonServiceReconciler) checkK8sCoreComponents(ctx context.Context) ([
 				status = "Running"
 			}
 
-			coreStatuses = append(coreStatuses, monitoringv1alpha1.NodeServiceStatus{
+			coreStatuses = append(coreStatuses, monitoringv1alpha1.K8sMonitorStatus{
 				NodeName: pod.Spec.NodeName,
 				ServicesStatus: []monitoringv1alpha1.ServiceStatus{
 					{
@@ -399,7 +348,7 @@ func (r *DaemonServiceReconciler) checkK8sCoreComponents(ctx context.Context) ([
 	return coreStatuses, nil
 }
 
-func (r *DaemonServiceReconciler) waitForDaemonSetReady(ctx context.Context) error {
+func (r *MonitoringServiceReconciler) waitForDaemonSetReady(ctx context.Context) error {
 	daemonSet := &appsv1.DaemonSet{}
 	if err := r.Get(ctx, client.ObjectKey{Name: "service-monitor", Namespace: "default"}, daemonSet); err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
@@ -414,81 +363,82 @@ func (r *DaemonServiceReconciler) waitForDaemonSetReady(ctx context.Context) err
 	return fmt.Errorf("daemonset not ready yet")
 }
 
-func (r *DaemonServiceReconciler) deleteDaemonSet(ctx context.Context) error {
-	daemonSet := &appsv1.DaemonSet{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "service-monitor",
-			Namespace: "default",
-		},
-	}
-	if err := r.Delete(ctx, daemonSet); err != nil && !errors.IsNotFound(err) {
-		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return err
-	}
-	return nil
-}
+// func (r *MonitoringServiceReconciler) deleteDaemonSet(ctx context.Context) error {
+// 	daemonSet := &appsv1.DaemonSet{
+// 		ObjectMeta: metav1.ObjectMeta{
+// 			Name:      "service-monitor",
+// 			Namespace: "default",
+// 		},
+// 	}
+// 	if err := r.Delete(ctx, daemonSet); err != nil && !errors.IsNotFound(err) {
+// 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
+// 		return err
+// 	}
+// 	return nil
+// }
 
 // Fetch status of multiple services from pod logs
-func (r *DaemonServiceReconciler) getMultiServiceStatusFromPod(ctx context.Context, pod corev1.Pod) (monitoringv1alpha1.NodeServiceStatus, error) {
-	logs := &corev1.PodLogOptions{}
+func (r *MonitoringServiceReconciler) getMultiServiceStatusFromPod(ctx context.Context, pod corev1.Pod, serviceList []string) (monitoringv1alpha1.NodeServiceMonitorStatus, error) {
+	var status []monitoringv1alpha1.ServiceStatus
+	var command []string
 	cfg, err := config.GetConfig()
 	if err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return monitoringv1alpha1.NodeServiceStatus{}, err
+		return monitoringv1alpha1.NodeServiceMonitorStatus{}, err
 	}
 	clientset, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return monitoringv1alpha1.NodeServiceStatus{}, err
+		return monitoringv1alpha1.NodeServiceMonitorStatus{}, err
 	}
-	req := clientset.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, logs)
-	logStream, err := req.Stream(ctx)
-	if err != nil {
-		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return monitoringv1alpha1.NodeServiceStatus{}, err
-	}
-	defer logStream.Close()
+	for _, service := range serviceList {
+		command = []string{"systemctl", "is-active", service}
+		req := clientset.CoreV1().RESTClient().Post().Resource("pods").
+			Namespace(pod.Namespace).
+			Name(pod.Name).
+			SubResource("exec").
+			Param("container", "nsenter").
+			Param("stdout", "true").
+			Param("stderr", "true").
+			Param("tty", "true")
 
-	buf := new(bytes.Buffer)
-	if _, err := io.Copy(buf, logStream); err != nil {
-		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return monitoringv1alpha1.NodeServiceStatus{}, err
-	}
-
-	logOutput := buf.String()
-
-	// Parse the JSON output from the pod log
-	var parsedLog struct {
-		Node     string                             `json:"node"`
-		Services []monitoringv1alpha1.ServiceStatus `json:"services"`
-	}
-
-	if err := json.Unmarshal([]byte(logOutput), &parsedLog); err != nil {
-		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return monitoringv1alpha1.NodeServiceStatus{}, err
-	}
-
-	return monitoringv1alpha1.NodeServiceStatus{
-		NodeName:       parsedLog.Node,
-		ServicesStatus: parsedLog.Services,
-	}, nil
-}
-
-func convertServiceNames(services []string) []string {
-	converted := make([]string, len(services))
-	for i, service := range services {
-		// Surround the first character with square brackets
-		if len(service) > 0 {
-			converted[i] = fmt.Sprintf("[%c]%s", service[0], service[1:])
+		for _, cmd := range command {
+			req.Param("command", cmd)
 		}
+		exec, err := remotecommand.NewSPDYExecutor(cfg, "POST", req.URL())
+		if err != nil {
+			return monitoringv1alpha1.NodeServiceMonitorStatus{}, err
+		}
+		var stdout, stderr bytes.Buffer
+		err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+			Stdout: bufio.NewWriter(&stdout),
+			Stderr: bufio.NewWriter(&stderr),
+		})
+
+		if err != nil {
+			status = append(status, monitoringv1alpha1.ServiceStatus{
+				ServiceName:   service,
+				ServiceStatus: stdout.String(),
+			})
+		} else if stderr.Len() == 0 {
+			status = append(status, monitoringv1alpha1.ServiceStatus{
+				ServiceName:   service,
+				ServiceStatus: stdout.String(),
+			})
+		}
+
 	}
-	return converted
+	return monitoringv1alpha1.NodeServiceMonitorStatus{
+		NodeName:       pod.Spec.NodeName,
+		ServicesStatus: status,
+	}, nil
+
 }
 
 // SetupWithManager sets up the controller with the Manager.
-func (r *DaemonServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+func (r *MonitoringServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&monitoringv1alpha1.DaemonService{}).
+		For(&monitoringv1alpha1.MonitoringService{}).
 		Complete(r)
 
 }
@@ -523,16 +473,11 @@ func getOldData(name string) ([]byte, error) {
 }
 
 func getDiff(oldContent, newContent string) (string, error) {
-	oldLines := difflib.SplitLines(oldContent)
-	newLines := difflib.SplitLines(newContent)
 
-	diff := difflib.UnifiedDiff{
-		A:        oldLines,
-		B:        newLines,
-		FromFile: "Old Version",
-		ToFile:   "New Version",
-		Context:  3,
-	}
+	dmp := difflib.New()
 
-	return difflib.GetUnifiedDiffString(diff)
+	diffs := dmp.DiffMain(oldContent, newContent, false)
+	diffText := dmp.DiffPrettyText(diffs)
+
+	return diffText, nil
 }

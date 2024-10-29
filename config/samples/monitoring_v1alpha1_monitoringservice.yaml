@@ -1,0 +1,20 @@
+apiVersion: monitoring.neridio.com/v1alpha1
+kind: MonitoringService
+metadata:
+  labels:
+    app.kubernetes.io/name: monitoringservice
+    app.kubernetes.io/instance: monitoringservice-sample
+    app.kubernetes.io/part-of: security-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: security-operator
+  name: monitoringservice-sample
+spec:
+  k8sMonitor:
+    enabled: true
+  k8sConfigDrift:
+    enabled: true
+  nodeServiceMonitor:
+    enabled: true                   
+    services:
+      - "service1"
+      - "rserver"
