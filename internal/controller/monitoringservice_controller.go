@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
+	"sort"
 	"time"
 
 	"crypto/sha256"
@@ -15,6 +17,7 @@ import (
 
 	monitoringv1alpha1 "github.com/bharath-rafay/security-operator/api/v1alpha1"
 	difflib "github.com/sergi/go-diff/diffmatchpatch"
+	veleroClientset "github.com/vmware-tanzu/velero/pkg/generated/clientset/versioned"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -28,6 +31,11 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+)
+
+var (
+	infoLogger   = ctrl.Log
+	immutableDir = "/velero-backup"
 )
 
 // MonitoringServiceReconciler reconciles a MonitoringService object
@@ -56,7 +64,13 @@ func (r *MonitoringServiceReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 		return ctrl.Result{RequeueAfter: time.Minute * 5}, client.IgnoreNotFound(err)
 	}
-
+	infoLogger.Info("got cr")
+	kubeClient, vClient, err := getClientset()
+	if err != nil {
+		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
+		return ctrl.Result{RequeueAfter: time.Minute * 5}, client.IgnoreNotFound(err)
+	}
+	infoLogger.Info("got kubeclient and vclient")
 	// Step 2: Monitor Kubernetes core components if enabled
 	k8sNodeStatuses := []monitoringv1alpha1.K8sMonitorStatus{}
 	NodeServiceStatus := []monitoringv1alpha1.NodeServiceMonitorStatus{}
@@ -68,10 +82,10 @@ func (r *MonitoringServiceReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		}
 		k8sNodeStatuses = append(k8sNodeStatuses, coreStatuses...)
 	}
-
+	infoLogger.Info("got k8smonitor")
 	// Step 3: Deploy the DaemonSet to monitor custom daemon services if needed
 	if MonitoringService.Spec.NodeServiceMonitor.Enabled && len(MonitoringService.Spec.NodeServiceMonitor.Services) > 0 {
-		if err := r.deployDaemonSet(ctx, MonitoringService); err != nil {
+		if err := r.deployDaemonSet(ctx); err != nil {
 			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
 		}
@@ -92,7 +106,7 @@ func (r *MonitoringServiceReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			NodeServiceStatus = append(NodeServiceStatus, nodeStatus)
 		}
 	}
-
+	infoLogger.Info("got nodemonitor")
 	configStatuses, err := r.checkK8sCorePodChanges(ctx, &MonitoringService)
 	if err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
@@ -103,12 +117,51 @@ func (r *MonitoringServiceReconciler) Reconcile(ctx context.Context, req ctrl.Re
 	MonitoringService.Status.K8sMonitorStatus = k8sNodeStatuses
 	MonitoringService.Status.NodeServiceMonitorStatus = NodeServiceStatus
 	MonitoringService.Status.K8sConfigDriftStatus = configStatuses
+	infoLogger.Info("got configdrift")
+	if MonitoringService.Spec.Velero.MonitorBackups {
+		up, err := checkVeleroStatus(ctx, kubeClient, "rafay-system")
+		if err != nil {
+			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
+			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
+		}
+		if up {
+			out, err := checkVeleroBackups(ctx, vClient, "rafay-system")
+			if err != nil {
+				infoLogger.Error(err, "error velero backups")
+				MonitoringService.Status.VeleroStatus.BackupCount = 0
+				return ctrl.Result{RequeueAfter: time.Minute * 1}, err
+			}
+			infoLogger.Info("output", "out", out)
+			MonitoringService.Status.VeleroStatus.Backups = out
+			MonitoringService.Status.VeleroStatus.BackupCount = len(out)
+		} else {
+			MonitoringService.Status.VeleroStatus.BackupCount = 0
+		}
+	}
+	infoLogger.Info("got backupstatus")
+
+	if MonitoringService.Spec.Velero.EnforceImmutability {
+		podList := &corev1.PodList{}
+		labelSelector := labels.SelectorFromSet(labels.Set{"app": "nsenter-daemon"})
+		if err := r.List(ctx, podList, &client.ListOptions{LabelSelector: labelSelector}); err != nil {
+			//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
+			return ctrl.Result{RequeueAfter: time.Minute * 5}, err
+		}
+
+		for _, pod := range podList.Items {
+			status, err := setImmutability(ctx, kubeClient, &pod, immutableDir)
+			if err != nil {
+				return ctrl.Result{RequeueAfter: time.Minute * 5}, err
+			}
+			MonitoringService.Status.VeleroStatus.ImmutableStatus = append(MonitoringService.Status.VeleroStatus.ImmutableStatus, status)
+		}
+	}
+
 	if err := r.Status().Update(ctx, &MonitoringService); err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 		return ctrl.Result{RequeueAfter: time.Minute * 5}, err
 	}
-
-	// Requeue after a specified interval
+	// Requeue after a secified interval
 	return ctrl.Result{RequeueAfter: time.Minute * 5}, nil
 }
 
@@ -181,16 +234,14 @@ func (r *MonitoringServiceReconciler) checkK8sCorePodChanges(ctx context.Context
 
 // Generate a diff for the pod spec (or just include relevant fields for simplicity)
 func (r *MonitoringServiceReconciler) generatePodConfigDiff(pod *corev1.Pod, name string) (string, error) {
-	// relevantSpec := struct {
-	// 	Containers []corev1.Container `json:"containers"`
-	// 	Volumes    []corev1.Volume    `json:"volumes"`
-	// }{
-	// 	Containers: pod.Spec.Containers,
-	// 	Volumes:    pod.Spec.Volumes,
-	// }
+	relevantSpec := struct {
+		Spec corev1.PodSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+	}{
+		Spec: pod.Spec,
+	}
 
 	// Return the relevant parts of the pod spec as a diff (could be more sophisticated)
-	podSpecBytes, err := json.Marshal(pod)
+	podSpecBytes, err := json.Marshal(relevantSpec)
 	if err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 		return "", err
@@ -204,7 +255,7 @@ func (r *MonitoringServiceReconciler) generatePodConfigDiff(pod *corev1.Pod, nam
 	return getDiff(string(oldSpecBytes), string(podSpecBytes))
 }
 
-func (r *MonitoringServiceReconciler) deployDaemonSet(ctx context.Context, MonitoringService monitoringv1alpha1.MonitoringService) error {
+func (r *MonitoringServiceReconciler) deployDaemonSet(ctx context.Context) error {
 	// serviceList := convertServiceNames(MonitoringService.Spec.NodeServiceMonitor.Services)
 	daemonSet := &appsv1.DaemonSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -265,7 +316,12 @@ func computePodSpecChecksum(pod *corev1.Pod, name string) (string, error) {
 	// Extract relevant fields from the pod spec (command, args, env, etc.)
 	file := "/data/" + name + ".yaml"
 	// Serialize the relevant fields to JSON
-	podSpecBytes, err := json.Marshal(pod)
+	relevantSpec := struct {
+		Spec corev1.PodSpec `json:"spec,omitempty" protobuf:"bytes,2,opt,name=spec"`
+	}{
+		Spec: pod.Spec,
+	}
+	podSpecBytes, err := json.Marshal(relevantSpec)
 	if err != nil {
 		return "", err
 	}
@@ -348,45 +404,16 @@ func (r *MonitoringServiceReconciler) checkK8sCoreComponents(ctx context.Context
 	return coreStatuses, nil
 }
 
-func (r *MonitoringServiceReconciler) waitForDaemonSetReady(ctx context.Context) error {
-	daemonSet := &appsv1.DaemonSet{}
-	if err := r.Get(ctx, client.ObjectKey{Name: "service-monitor", Namespace: "default"}, daemonSet); err != nil {
-		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-		return err
-	}
-
-	// Check if all desired pods are available
-	if daemonSet.Status.NumberAvailable == daemonSet.Status.DesiredNumberScheduled {
-		return nil // All pods are ready
-	}
-
-	return fmt.Errorf("daemonset not ready yet")
-}
-
-// func (r *MonitoringServiceReconciler) deleteDaemonSet(ctx context.Context) error {
-// 	daemonSet := &appsv1.DaemonSet{
-// 		ObjectMeta: metav1.ObjectMeta{
-// 			Name:      "service-monitor",
-// 			Namespace: "default",
-// 		},
-// 	}
-// 	if err := r.Delete(ctx, daemonSet); err != nil && !errors.IsNotFound(err) {
-// 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
-// 		return err
-// 	}
-// 	return nil
-// }
-
 // Fetch status of multiple services from pod logs
 func (r *MonitoringServiceReconciler) getMultiServiceStatusFromPod(ctx context.Context, pod corev1.Pod, serviceList []string) (monitoringv1alpha1.NodeServiceMonitorStatus, error) {
 	var status []monitoringv1alpha1.ServiceStatus
 	var command []string
-	cfg, err := config.GetConfig()
+	clientset, _, err := getClientset()
 	if err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 		return monitoringv1alpha1.NodeServiceMonitorStatus{}, err
 	}
-	clientset, err := kubernetes.NewForConfig(cfg)
+	cfg, err := config.GetConfig()
 	if err != nil {
 		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
 		return monitoringv1alpha1.NodeServiceMonitorStatus{}, err
@@ -480,4 +507,132 @@ func getDiff(oldContent, newContent string) (string, error) {
 	diffText := dmp.DiffPrettyText(diffs)
 
 	return diffText, nil
+}
+
+// checkVeleroStatus checks if Velero is running by listing pods with label app=velero in the velero namespace
+func checkVeleroStatus(ctx context.Context, clientset *kubernetes.Clientset, namespace string) (bool, error) {
+	// List Velero pods with label app=velero
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "name=velero",
+	})
+	if err != nil {
+		return false, fmt.Errorf("failed to list Velero pods: %v", err)
+	}
+
+	// Check if all Velero pods are running
+	for _, pod := range pods.Items {
+		if pod.Status.Phase != corev1.PodRunning {
+			log.Printf("Pod %s is not running; current status: %s", pod.Name, pod.Status.Phase)
+			return false, nil // One or more Velero pods are not running
+		}
+	}
+
+	// All Velero pods are running
+	return true, nil
+}
+
+// checkVeleroBackups checks if there are scheduled or successful Velero backups
+func checkVeleroBackups(ctx context.Context, veleroClient *veleroClientset.Clientset, namespace string) ([]monitoringv1alpha1.Backup, error) {
+	var backupList []monitoringv1alpha1.Backup
+	var b monitoringv1alpha1.Backup
+	backups, err := veleroClient.VeleroV1().Backups(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		infoLogger.Error(err, "failed to list Velero backups")
+		return []monitoringv1alpha1.Backup{}, fmt.Errorf("failed to list Velero backups: %v", err)
+	}
+
+	sort.Slice(backups.Items, func(i, j int) bool {
+		return backups.Items[i].CreationTimestamp.Time.After(backups.Items[j].CreationTimestamp.Time)
+	})
+
+	// Get the last 10 backups, or fewer if there aren't enough
+	n := 10
+	if len(backups.Items) < n {
+		n = len(backups.Items)
+	}
+
+	// Check if any backups exist with a successful status
+	for _, backup := range backups.Items[:n] {
+		b.Name = backup.Name
+		b.Status = string(backup.Status.Phase)
+		infoLogger.Info("backups", "name", b.Name, "status", b.Status)
+		backupList = append(backupList, b)
+	}
+	infoLogger.Info("backups", "list", backupList)
+	return backupList, nil
+}
+
+func getClientset() (*kubernetes.Clientset, *veleroClientset.Clientset, error) {
+	cfg, err := config.GetConfig()
+	if err != nil {
+		infoLogger.Error(err, "error getting kubeconfig")
+		return nil, nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		infoLogger.Error(err, "error getting clienset")
+		return nil, nil, err
+	}
+	vClient, err := veleroClientset.NewForConfig(cfg)
+	if err != nil {
+		infoLogger.Error(err, "error getting vclientset")
+		return clientset, nil, err
+	}
+
+	return clientset, vClient, nil
+}
+
+func setImmutability(ctx context.Context, client *kubernetes.Clientset, pod *corev1.Pod, dir string) (monitoringv1alpha1.NodeImmutableStatus, error) {
+	cfg, err := config.GetConfig()
+	if err != nil {
+		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
+		return monitoringv1alpha1.NodeImmutableStatus{}, err
+	}
+	command := []string{"chattr", "+i", dir}
+	req := client.CoreV1().RESTClient().Post().Resource("pods").
+		Namespace(pod.Namespace).
+		Name(pod.Name).
+		SubResource("exec").
+		Param("container", "nsenter").
+		Param("stdout", "true").
+		Param("stderr", "true").
+		Param("tty", "true")
+
+	for _, cmd := range command {
+		req.Param("command", cmd)
+	}
+	exec, err := remotecommand.NewSPDYExecutor(cfg, "POST", req.URL())
+	if err != nil {
+		return monitoringv1alpha1.NodeImmutableStatus{}, err
+	}
+	var stdout, stderr bytes.Buffer
+	err = exec.StreamWithContext(ctx, remotecommand.StreamOptions{
+		Stdout: bufio.NewWriter(&stdout),
+		Stderr: bufio.NewWriter(&stderr),
+	})
+	if err != nil {
+		return monitoringv1alpha1.NodeImmutableStatus{}, err
+	}
+	if stderr.Len() == 0 {
+		return monitoringv1alpha1.NodeImmutableStatus{
+			NodeName: pod.Spec.NodeName,
+			Status:   "Success",
+		}, nil
+	} else {
+		return monitoringv1alpha1.NodeImmutableStatus{
+			NodeName: pod.Spec.NodeName,
+			Status:   "Failed",
+		}, nil
+
+	}
+}
+
+func (r *MonitoringServiceReconciler) getNsenterpods(ctx context.Context) (*corev1.PodList, error) {
+	podList := &corev1.PodList{}
+	labelSelector := labels.SelectorFromSet(labels.Set{"app": "nsenter-daemon"})
+	if err := r.List(ctx, podList, &client.ListOptions{LabelSelector: labelSelector}); err != nil {
+		//r.logger(&reconcile.Request{}).Error(err, "daeomon service error")
+		return nil, err
+	}
+	return podList, nil
 }

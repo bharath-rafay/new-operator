@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: registry.dev.rafay-edge.net/bharath/security-operator
-  newTag: v0.12
+  newTag: v0.21

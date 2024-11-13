@@ -18,3 +18,7 @@ spec:
     services:
       - "service1"
       - "rserver"
+  velero:
+    monitorBackups: true
+    enforceImmutability: true
+

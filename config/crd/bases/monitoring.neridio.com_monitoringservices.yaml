@@ -155,7 +155,6 @@ spec:
                       type: array
                   required:
                   - nodeName
-                  - servicesStatus
                   type: object
                 type: array
               nodeServiceMonitorStatus:
@@ -177,10 +176,38 @@ spec:
                       type: array
                   required:
                   - nodeName
-                  - servicesStatus
                   type: object
                 type: array
               veleroStatus:
+                properties:
+                  backupCount:
+                    type: integer
+                  backups:
+                    items:
+                      properties:
+                        name:
+                          type: string
+                        status:
+                          type: string
+                      required:
+                      - name
+                      - status
+                      type: object
+                    type: array
+                  immutableStatus:
+                    items:
+                      properties:
+                        nodeName:
+                          type: string
+                        status:
+                          type: string
+                      required:
+                      - nodeName
+                      - status
+                      type: object
+                    type: array
+                required:
+                - backupCount
                 type: object
             type: object
         type: object

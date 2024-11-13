@@ -91,11 +91,19 @@ type ConfigDriftStatus struct {
 }
 
 type VeleroStatus struct {
+	Backups         []Backup              `json:"backups,omitempty"`
+	BackupCount     int                   `json:"backupCount"`
+	ImmutableStatus []NodeImmutableStatus `json:"immutableStatus,omitempty"`
+}
+
+type Backup struct {
+	Name   string `json:"name"`
+	Status string `json:"status"`
 }
 
 type K8sMonitorStatus struct {
 	NodeName       string          `json:"nodeName"`
-	ServicesStatus []ServiceStatus `json:"servicesStatus"`
+	ServicesStatus []ServiceStatus `json:"servicesStatus,omitempty"`
 }
 
 type K8sConfigDriftStatus struct {
@@ -108,7 +116,12 @@ type K8sConfigDriftStatus struct {
 
 type NodeServiceMonitorStatus struct {
 	NodeName       string          `json:"nodeName"`
-	ServicesStatus []ServiceStatus `json:"servicesStatus"`
+	ServicesStatus []ServiceStatus `json:"servicesStatus,omitempty"`
+}
+
+type NodeImmutableStatus struct {
+	NodeName string `json:"nodeName"`
+	Status   string `json:"status"`
 }
 
 type ServiceStatus struct {
